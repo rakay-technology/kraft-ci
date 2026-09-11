@@ -1,0 +1,577 @@
+name: Release
+
+# Builds every shippable artifact for a tag of the PRIVATE
+# rakay-technology/kraft and publishes them there (GitHub release + npm).
+# Runs in rakay-technology/kraft-ci (PUBLIC repo, unlimited free minutes).
+# Build tarballs transit through this run's artifacts (retention 1 day) and
+# are uploaded to the PRIVATE repo's release — nothing is stored here.
+#
+# Trigger: dispatch with the release tag AFTER it exists on the private repo:
+#   gh workflow run Release -R rakay-technology/kraft-ci -f tag=v0.7.10
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag on rakay-technology/kraft to publish (e.g. v0.7.10)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Release gate
+    uses: ./.github/workflows/release-gate.yml
+    with:
+      ref: ${{ inputs.tag }}
+    secrets:
+      KRAFT_PAT: ${{ secrets.KRAFT_PAT }}
+
+  build-server:
+    name: Build kraft release artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Read bun version
+        id: bun-version
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Restore bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build kraft release
+        run: bun run --cwd apps/api build-release
+
+      - name: Package release artifact
+        id: package
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          ARTIFACT="kraft-${TAG}-linux-amd64.tar.gz"
+          tar -czf "${ARTIFACT}" -C apps/api/release-dist .
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kraft-release
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.artifact }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-email:
+    name: Build kraft email release artifact
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Read bun version
+        id: bun-version
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Restore bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build email release
+        run: bun run --cwd apps/email build
+
+      - name: Package release artifact
+        id: package
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          ARTIFACT="kraft-email-${TAG}-linux-amd64.tar.gz"
+          tar -czf "${ARTIFACT}" -C apps/email/dist .
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kraft-email-release
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.artifact }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-dashboard:
+    name: Build dashboard bundle (lazy-downloaded by `kraft up`)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Read bun version
+        id: bun-version
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Restore bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build dashboard (Next standalone)
+        run: bun run --cwd apps/dashboard build
+        env:
+          NODE_ENV: production
+          CLOUD_MODE: "false"
+          KRAFT_TARGET: local
+          NEXT_PUBLIC_API_PROXY: "true"
+
+      - name: Package dashboard bundle
+        id: package
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          STAGING="dashboard-dist"
+          rm -rf "$STAGING"; mkdir -p "$STAGING"
+          cp -a apps/dashboard/.next/standalone/. "$STAGING"/
+          mkdir -p "$STAGING/apps/dashboard/.next"
+          cp -a apps/dashboard/.next/static "$STAGING/apps/dashboard/.next/static"
+          if [ -d apps/dashboard/public ]; then
+            cp -a apps/dashboard/public "$STAGING/apps/dashboard/public"
+          fi
+          ARTIFACT="kraft-dashboard-${TAG}.tar.gz"
+          tar -czf "$ARTIFACT" -C "$STAGING" .
+          sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kraft-dashboard-release
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.artifact }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-cli-payload:
+    name: Build CLI runtime payload (downloaded by scripts/install.sh)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Read bun version
+        id: bun-version
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Restore bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build CLI payload
+        run: bun run --cwd apps/cli build:payload
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kraft-cli-release
+          include-hidden-files: true
+          path: |
+            apps/cli/.cli-payload/kraft-cli-*.tar.gz
+            apps/cli/.cli-payload/kraft-cli-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  build-desktop:
+    name: Build desktop installer (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+            find: "-name *.zip"
+            asset: Kraft-win32-x64.zip
+          - os: ubuntu-latest
+            label: Linux x64
+            find: "-name *.AppImage -o -name *.deb -o -name *.rpm"
+            asset: Kraft.AppImage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Read bun version
+        id: bun-version
+        shell: bash
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Restore bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install AppImage build deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfuse2
+
+      - name: Build installer
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: bun run --cwd apps/desktop make
+
+      - name: Collect + rename installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APPIMAGE="$(find apps/desktop/out/make -type f -name '*.AppImage' | head -n1)"
+          if [[ -n "${APPIMAGE}" ]]; then
+            cp "${APPIMAGE}" "dist/${{ matrix.asset }}"
+            cd dist
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+            else
+              sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+            fi
+            cd ..
+          else
+            echo "::warning::No AppImage found"
+          fi
+          DEB="$(find apps/desktop/out/make -type f -name '*.deb' | head -n1)"
+          if [[ -n "${DEB}" ]]; then
+            cp "${DEB}" "dist/Kraft.deb"
+            cd dist
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "Kraft.deb" > "Kraft.deb.sha256"
+            else
+              sha256sum "Kraft.deb" > "Kraft.deb.sha256"
+            fi
+            cd ..
+          else
+            echo "::warning::No .deb found"
+          fi
+          RPM="$(find apps/desktop/out/make -type f -name '*.rpm' | head -n1)"
+          if [[ -n "${RPM}" ]]; then
+            cp "${RPM}" "dist/Kraft.rpm"
+            cd dist
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "Kraft.rpm" > "Kraft.rpm.sha256"
+            else
+              sha256sum "Kraft.rpm" > "Kraft.rpm.sha256"
+            fi
+            cd ..
+          else
+            echo "::warning::No .rpm found"
+          fi
+          if [[ "${{ matrix.asset }}" == *.zip ]]; then
+            ZIP="$(find apps/desktop/out/make -type f -name '*.zip' | head -n1)"
+            if [[ -n "${ZIP}" ]]; then
+              cp "${ZIP}" "dist/${{ matrix.asset }}"
+              cd dist
+              if command -v shasum >/dev/null 2>&1; then
+                shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+              else
+                sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+              fi
+              cd ..
+            else
+              echo "::warning::No .zip found"
+            fi
+          fi
+          if [[ -z "$(find dist -type f)" ]]; then
+            echo "No installers matched under apps/desktop/out/make"
+            find apps/desktop/out/make -type f || true
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-npm:
+    name: Publish CLI to npm
+    runs-on: ubuntu-24.04
+    needs: [gate, publish]
+    if: needs.publish.result == 'success'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Read bun version
+        id: bun-version
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+
+      - name: Ensure npm supports trusted publishing (OIDC)
+        run: npm install -g npm@latest
+
+      - name: Restore bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build CLI
+        run: bun run --cwd apps/cli build
+
+      - name: Release smoke — built CLI launches + server boots
+        run: SMOKE_SKIP_BUILD=1 bash apps/cli/scripts/release-smoke.sh
+
+      - name: Publish to npm (token auth via NPM_TOKEN)
+        working-directory: apps/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          NAME="$(npm pkg get name | tr -d '"')"
+          VERSION="$(npm pkg get version | tr -d '"')"
+          if [ -n "$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)" ]; then
+            echo "::notice::${NAME}@${VERSION} already on npm — skipping publish (re-run of an existing release)."
+            exit 0
+          fi
+          node -e '
+            const fs = require("fs");
+            const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const stripped = [];
+            for (const k of Object.keys(p.dependencies || {})) {
+              if (String(p.dependencies[k]).startsWith("workspace:")) {
+                delete p.dependencies[k];
+                stripped.push(k);
+              }
+            }
+            fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");
+            console.log("stripped workspace deps:", stripped.join(", ") || "(none)");
+          '
+          if grep -q '"workspace:' package.json; then
+            echo "::error::a workspace:* dependency survived the strip — refusing to publish an uninstallable package."
+            exit 1
+          fi
+          if [[ "${TAG}" == *-* ]]; then
+            npm publish --access public --tag next
+          else
+            npm publish --access public
+          fi
+
+  publish:
+    name: Publish GitHub release (on the PRIVATE repo)
+    needs: [gate, build-server, build-email, build-dashboard, build-cli-payload, build-desktop]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Download kraft artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: kraft-release
+          path: dist
+
+      - name: Download email artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: kraft-email-release
+          path: dist
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: kraft-dashboard-release
+          path: dist
+
+      - name: Download CLI payload artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: kraft-cli-release
+          path: dist
+
+      - name: Download desktop installers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.KRAFT_PAT }}
+          GH_REPO: rakay-technology/kraft
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          PRERELEASE_FLAG=""
+          if [[ "${TAG}" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          CORE_ASSETS=(
+            "dist/kraft-${TAG}-linux-amd64.tar.gz"
+            "dist/kraft-${TAG}-linux-amd64.tar.gz.sha256"
+            "dist/kraft-email-${TAG}-linux-amd64.tar.gz"
+            "dist/kraft-email-${TAG}-linux-amd64.tar.gz.sha256"
+            "dist/kraft-dashboard-${TAG}.tar.gz"
+            "dist/kraft-dashboard-${TAG}.tar.gz.sha256"
+            "dist/kraft-cli-${TAG}.tar.gz"
+            "dist/kraft-cli-${TAG}.tar.gz.sha256"
+          )
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::notice::Release ${TAG} exists — re-uploading core assets (--clobber)."
+            gh release upload "${TAG}" "${CORE_ASSETS[@]}" --clobber
+          else
+            gh release create "${TAG}" \
+              --title "Kraft ${TAG}" \
+              --notes-from-tag \
+              ${PRERELEASE_FLAG} \
+              "${CORE_ASSETS[@]}"
+          fi
+
+      - name: Attach desktop installers
+        env:
+          GH_TOKEN: ${{ secrets.KRAFT_PAT }}
+          GH_REPO: rakay-technology/kraft
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          for asset in Kraft-win32-x64.zip Kraft.AppImage Kraft.deb Kraft.rpm; do
+            if [[ -f "dist/${asset}" ]]; then
+              gh release upload "${TAG}" "dist/${asset}" "dist/${asset}.sha256" --clobber
+            else
+              echo "::warning::desktop installer missing: ${asset}"
+            fi
+          done

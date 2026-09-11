@@ -1,0 +1,124 @@
+name: CI
+
+# Runs in rakay-technology/kraft-ci (PUBLIC repo, unlimited free minutes).
+# Builds + tests the PRIVATE rakay-technology/kraft at a given ref.
+# Nothing is published from here and no release is stored here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA of rakay-technology/kraft to validate (default: main)"
+        required: false
+        type: string
+        default: main
+
+concurrency:
+  group: ci-${{ inputs.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned to the repo's toolchain (see .bun-version and the
+          # `packageManager` field in package.json). Never `latest` here:
+          # Bun 1.4.x rewrites bun.lock metadata, which pollutes diffs.
+          bun-version: 1.3.10
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck apps/api
+        run: bun run --cwd apps/api lint
+
+      - name: Typecheck apps/dashboard
+        run: bun run --cwd apps/dashboard lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run tests
+        run: bun run test
+
+  webmail-server-test:
+    name: Test webmail server
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-webmail-${{ hashFiles('apps/email/server/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-webmail-
+            ${{ runner.os }}-bun-
+
+      - name: Install webmail server dependencies
+        working-directory: apps/email/server
+        run: bun install
+
+      - name: Run webmail server tests
+        working-directory: apps/email/server
+        run: bun test

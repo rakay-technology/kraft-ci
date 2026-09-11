@@ -1,0 +1,286 @@
+name: Docker images
+
+# Publishes the official pull-based images to the PRIVATE GHCR namespace
+# ghcr.io/rakay-technology (kraft-api + kraft-dashboard + kraft-edge +
+# kraft-mail + kraft-webmail). Runs in rakay-technology/kraft-ci (PUBLIC repo,
+# unlimited free minutes) against a tag of the PRIVATE rakay-technology/kraft.
+# No image, tag or release is ever stored in this public repo.
+#
+# Trigger: dispatch with the release tag AFTER it exists on the private repo:
+#   gh workflow run "Docker images" -R rakay-technology/kraft-ci -f tag=v0.7.10
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag on rakay-technology/kraft to build + publish (e.g. v0.7.10)"
+        required: true
+        type: string
+
+concurrency:
+  group: docker-images-${{ inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Release gate
+    uses: ./.github/workflows/release-gate.yml
+    with:
+      ref: ${{ inputs.tag }}
+    secrets:
+      KRAFT_PAT: ${{ secrets.KRAFT_PAT }}
+
+  build-images:
+    name: Build ${{ matrix.image }} (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, dashboard, edge, mail, webmail]
+        platform: [amd64]
+        include:
+          - image: api
+            dockerfile: apps/api/Dockerfile
+          - image: dashboard
+            dockerfile: apps/dashboard/Dockerfile
+          - image: edge
+            dockerfile: apps/edge/Dockerfile
+          - image: mail
+            dockerfile: apps/email/Dockerfile
+          - image: webmail
+            dockerfile: apps/email/Dockerfile.webmail
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.KRAFT_PAT }}
+
+      - name: Image labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/rakay-technology/kraft-${{ matrix.image }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/rakay-technology/kraft-${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform }}
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  update-e2e:
+    name: E2E (update from previous release)
+    needs: build-images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.KRAFT_PAT }}
+
+      - name: Resolve the new api image digest
+        id: newimage
+        uses: actions/download-artifact@v8
+        with:
+          name: digests-api-amd64
+          path: /tmp/api-digest
+
+      - name: Build the image reference
+        id: ref
+        run: |
+          set -euo pipefail
+          digest="$(ls /tmp/api-digest | head -1)"
+          if [ -z "$digest" ]; then
+            echo "No digest artifact — build-images did not export one for api/amd64." >&2
+            exit 1
+          fi
+          echo "image=ghcr.io/rakay-technology/kraft-api@sha256:${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the Docker daemon
+        run: |
+          docker info
+          docker version
+
+      - name: Run the update E2E
+        env:
+          RUN_DOCKER_E2E: "1"
+          E2E_SCOPE: update
+          KRAFT_E2E_NEW_API_IMAGE: ${{ steps.ref.outputs.image }}
+          KRAFT_E2E_IMAGE_REGISTRY: ghcr.io/rakay-technology
+        run: bun run --cwd apps/api test:e2e
+
+  dashboard-routes:
+    name: Audit dashboard route surface
+    needs: build-images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.KRAFT_PAT }}
+
+      - name: Resolve the new dashboard image digest
+        uses: actions/download-artifact@v8
+        with:
+          name: digests-dashboard-amd64
+          path: /tmp/dashboard-digest
+
+      - name: Extract the route manifest from the image
+        run: |
+          set -euo pipefail
+          digest="$(ls /tmp/dashboard-digest | head -1)"
+          if [ -z "$digest" ]; then
+            echo "No digest artifact — build-images did not export one for dashboard/amd64." >&2
+            exit 1
+          fi
+          image="ghcr.io/rakay-technology/kraft-dashboard@sha256:${digest}"
+          echo "Auditing $image"
+          docker pull -q "$image"
+          docker create --name dash-audit "$image" >/dev/null
+          docker cp dash-audit:/app/apps/dashboard/.next/app-path-routes-manifest.json /tmp/image-routes.json
+          docker rm -f dash-audit >/dev/null
+
+      - name: Every src/app page must be in the image
+        run: node apps/dashboard/scripts/check-routes.mjs /tmp/image-routes.json
+
+  merge-images:
+    name: Publish ${{ matrix.image }} (manifest)
+    needs: [gate, build-images, update-e2e, dashboard-routes]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, dashboard, edge, mail, webmail]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.KRAFT_PAT }}
+
+      # Tags are computed in bash, not docker/metadata-action: the semver tag
+      # type derives from github.ref, which is meaningless on a
+      # workflow_dispatch event. Same scheme as before: full + minor + major
+      # + :latest, except prereleases (v1.2.3-rc.1) which skip :latest.
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          MAJOR="${VERSION%%.*}"
+          REST="${VERSION#*.}"
+          MINOR="${REST%%.*}"
+          SRC="ghcr.io/rakay-technology/kraft-${{ matrix.image }}"
+          TAGS="-t ${SRC}:${VERSION} -t ${SRC}:${MAJOR}.${MINOR} -t ${SRC}:${MAJOR}"
+          if [[ "${TAG}" != *-* ]]; then
+            TAGS="${TAGS} -t ${SRC}:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create manifest list + push
+        working-directory: /tmp/digests
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+          SRC: ghcr.io/rakay-technology/kraft-${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          docker buildx imagetools create \
+            ${TAGS} \
+            $(printf "${SRC}@sha256:%s " *)
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect \
+            "ghcr.io/rakay-technology/kraft-${{ matrix.image }}:${{ steps.tags.outputs.version }}" || true
