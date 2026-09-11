@@ -248,7 +248,13 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # stage-cli-payload names the tarball from GITHUB_REF_NAME (a tag push on
+      # the old pipeline). On dispatch that variable is the branch, so the
+      # release tag is passed explicitly — otherwise the asset is misnamed
+      # (e.g. kraft-cli-main.tar.gz) and the publish job can't find it.
       - name: Build CLI payload
+        env:
+          GITHUB_REF_NAME: ${{ inputs.tag }}
         run: bun run --cwd apps/cli build:payload
 
       - name: Upload artifact
