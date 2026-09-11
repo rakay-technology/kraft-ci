@@ -33,6 +33,14 @@ on:
         required: false
         type: string
         default: "1/12"
+      deploy_mode:
+        description: "Deploy job mode: boot (real pull+boot, slow) or config-only (render check, all 540 in minutes)"
+        required: false
+        type: choice
+        options:
+          - boot
+          - config-only
+        default: boot
   schedule:
     - cron: "0 3 * * *"
 
@@ -138,9 +146,10 @@ jobs:
           retention-days: 7
 
   deploy:
-    name: Boot templates (${{ inputs.shard || '1/12' }})
-    # Dispatch-only: a full sweep is ~18h, sharded into ~90min slices. The
-    # nightly cron must NOT start boots unattended.
+    name: Boot templates (${{ inputs.deploy_mode || 'boot' }} ${{ inputs.shard || '1/12' }})
+    # Dispatch-only: a full boot sweep is ~18h, sharded into ~90min slices. The
+    # nightly cron must NOT start boots unattended. config-only mode ignores
+    # the shard and render-checks all 540 (minutes).
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -168,10 +177,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Boot template shard
+      - name: Boot template shard (or render-check all)
         env:
           TEMPLATES_ONLY: ${{ inputs.only || '' }}
-        run: bun run templates:deploy -- --shard "${{ inputs.shard || '1/12' }}" --timeout 150 --json /tmp/deploy-report.json
+        run: |
+          if [ "${{ inputs.deploy_mode || 'boot' }}" = "config-only" ]; then
+            bun run templates:deploy -- --config-only --json /tmp/deploy-report.json
+          else
+            bun run templates:deploy -- --shard "${{ inputs.shard || '1/12' }}" --timeout 150 --json /tmp/deploy-report.json
+          fi
 
       - name: Upload report
         if: always()
