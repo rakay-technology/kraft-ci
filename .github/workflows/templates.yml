@@ -1,16 +1,19 @@
 name: Templates
 
-# Autonomous static validation of the 540 app templates inherited from Dokploy
-# (packages/core/src/apps/catalog/*.json in the PRIVATE rakay-technology/kraft).
-# Runs `bun run templates` (scripts/validate-templates.ts): image pinning,
-# dependsOn/publicUrl/config/env references, ports, volumes, endpoints, shape.
+# Autonomous validation of the 540 app templates inherited from Dokploy
+# (packages/core/src/apps/catalog/*.json in the PRIVATE rakay-technology/kraft),
+# on THREE levels:
+#   validate → static checks (pinning, refs, ports, volumes, shape)
+#   images   → every referenced image exists on its registry (no pull)
+#   deploy   → every template actually BOOTS on a real daemon (sharded)
 #
 # Deliberately STANDALONE: not a release gate, not triggered by releases. A red
-# template blocks nothing — the per-template report below is the fix list, and
+# template blocks nothing — the per-template reports below are the fix list, and
 # templates get fixed one by one. Red until clean is the normal state.
 #
-# Triggers: nightly cron on main + manual dispatch (optional `only` filter for
-# a fast single-template check after a fix).
+# Triggers: nightly cron on main (validate + images) + manual dispatch.
+# Deploy is dispatch-only (540 boots ≈ 18h total): pick a shard (1/12…12/12)
+# or a single template via `only`.
 
 on:
   workflow_dispatch:
@@ -25,6 +28,11 @@ on:
         required: false
         type: string
         default: ""
+      shard:
+        description: "Only for the deploy job: which slice to boot, e.g. 1/12 (default runs shard 1/12)"
+        required: false
+        type: string
+        default: "1/12"
   schedule:
     - cron: "0 3 * * *"
 
@@ -71,5 +79,107 @@ jobs:
         with:
           name: templates-report
           path: /tmp/templates-report.json
+          if-no-files-found: error
+          retention-days: 7
+
+  images:
+    name: Check template images exist
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Weekly cache: image checks are anonymous registry HEADs (rate-limited),
+      # so reuse results ≤7 days old and only recheck the rest + unknowns.
+      - name: Restore image-check cache
+        uses: actions/cache@v6
+        with:
+          path: .templates-image-cache.json
+          key: tpl-images-${{ hashFiles('packages/core/src/apps/catalog/*.json') }}
+          restore-keys: |
+            tpl-images-
+
+      - name: Check all template images
+        env:
+          TEMPLATES_ONLY: ${{ inputs.only || '' }}
+          TPL_IMAGE_CACHE: .templates-image-cache.json
+          # Verifies our own private images too (anonymous check can't).
+          GHCR_TOKEN: ${{ secrets.KRAFT_PAT }}
+        run: bun run templates:images -- --json /tmp/images-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: images-report
+          path: /tmp/images-report.json
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Boot templates (${{ inputs.shard || '1/12' }})
+    # Dispatch-only: a full sweep is ~18h, sharded into ~90min slices. The
+    # nightly cron must NOT start boots unattended.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Boot template shard
+        env:
+          TEMPLATES_ONLY: ${{ inputs.only || '' }}
+        run: bun run templates:deploy -- --shard "${{ inputs.shard || '1/12' }}" --timeout 150 --json /tmp/deploy-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          # Fixed name (the shard "1/12" contains a slash, illegal in artifact
+          # names); artifacts are namespaced per run anyway.
+          name: deploy-report
+          path: /tmp/deploy-report.json
           if-no-files-found: error
           retention-days: 7
