@@ -1,0 +1,75 @@
+name: Templates
+
+# Autonomous static validation of the 540 app templates inherited from Dokploy
+# (packages/core/src/apps/catalog/*.json in the PRIVATE rakay-technology/kraft).
+# Runs `bun run templates` (scripts/validate-templates.ts): image pinning,
+# dependsOn/publicUrl/config/env references, ports, volumes, endpoints, shape.
+#
+# Deliberately STANDALONE: not a release gate, not triggered by releases. A red
+# template blocks nothing — the per-template report below is the fix list, and
+# templates get fixed one by one. Red until clean is the normal state.
+#
+# Triggers: nightly cron on main + manual dispatch (optional `only` filter for
+# a fast single-template check after a fix).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA of rakay-technology/kraft (default: main)"
+        required: false
+        type: string
+        default: main
+      only:
+        description: "Validate only matching template id(s), e.g. supabase (default: all)"
+        required: false
+        type: string
+        default: ""
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate templates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate all templates
+        env:
+          TEMPLATES_ONLY: ${{ inputs.only || '' }}
+        run: bun run templates -- --json /tmp/templates-report.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: templates-report
+          path: /tmp/templates-report.json
+          if-no-files-found: error
+          retention-days: 7
