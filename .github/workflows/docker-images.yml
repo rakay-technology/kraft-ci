@@ -284,3 +284,25 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             "ghcr.io/rakay-technology/kraft-${{ matrix.image }}:${{ steps.tags.outputs.version }}" || true
+
+      # Digests are only transit files for this run — wipe them so nothing
+      # lingers on the public repo. Sibling matrix jobs already downloaded
+      # their copies at job start. Same guards as the Release cleanup:
+      # success-only (rerun-safe) + never fail a green publish.
+      - name: Delete transit artifacts from this public run
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.KRAFT_PAT }}
+        run: |
+          set -euo pipefail
+          ids="$(gh api "repos/rakay-technology/kraft-ci/actions/runs/${GITHUB_RUN_ID}/artifacts" --paginate -q '.artifacts[].id')"
+          if [ -z "${ids}" ]; then
+            echo "No artifacts to delete."
+            exit 0
+          fi
+          for id in ${ids}; do
+            gh api -X DELETE "repos/rakay-technology/kraft-ci/actions/artifacts/${id}" >/dev/null 2>&1 \
+              && echo "deleted transit artifact ${id}" \
+              || echo "::warning::could not delete artifact ${id} (PAT needs Actions read+write)"
+          done

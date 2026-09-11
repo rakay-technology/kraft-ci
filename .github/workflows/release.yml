@@ -575,3 +575,26 @@ jobs:
               echo "::warning::desktop installer missing: ${asset}"
             fi
           done
+
+      # Everything above is published to the PRIVATE repo — wipe the transit
+      # copies here so the public window shrinks from 1 day to minutes.
+      # Runs only on full success: a failed publish keeps its artifacts for
+      # `rerun --failed`. continue-on-error: a PAT without the Actions
+      # permission must warn, never fail an otherwise green release.
+      - name: Delete transit artifacts from this public run
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.KRAFT_PAT }}
+        run: |
+          set -euo pipefail
+          ids="$(gh api "repos/rakay-technology/kraft-ci/actions/runs/${GITHUB_RUN_ID}/artifacts" --paginate -q '.artifacts[].id')"
+          if [ -z "${ids}" ]; then
+            echo "No artifacts to delete."
+            exit 0
+          fi
+          for id in ${ids}; do
+            gh api -X DELETE "repos/rakay-technology/kraft-ci/actions/artifacts/${id}" >/dev/null 2>&1 \
+              && echo "deleted transit artifact ${id}" \
+              || echo "::warning::could not delete artifact ${id} (PAT needs Actions read+write)"
+          done
