@@ -39,7 +39,7 @@ private repo. **No release, image, installer or source is stored here.**
 
 | Secret | What | Why |
 |---|---|---|
-| `KRAFT_PAT` | Fine-grained PAT, resource owner `rakay-technology`, repository access **only `kraft`**: Contents **read+write**, Packages **read+write**, Metadata read-only | checkout private code, push GHCR images, create/upload private releases |
+| `KRAFT_PAT` | Fine-grained PAT, resource owner `rakay-technology`, repository access **only `kraft`**: Contents **read+write**, Packages **read+write**, Actions **read+write**, Metadata read-only | checkout private code, push GHCR images, create/upload private releases, delete transit artifacts |
 | `NPM_TOKEN` | npm automation token | publish the CLI (token auth, works from any repo) |
 
 The stock `GITHUB_TOKEN` is only used for this repo's own caches/artifacts.
