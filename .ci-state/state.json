@@ -5,25 +5,31 @@
       "ref": "fix/drift-selfhosted",
       "kind": "pr#28",
       "state": "pending",
-      "at": "2026-09-26T12:52:07.900Z"
+      "at": "2026-09-26T16:47:29.733Z"
     },
     "6c4c0419e1cebe4ec57f0daa6bda8da9d7e36a0d": {
       "ref": "fix/backup-policy-needs-source",
       "kind": "pr#32",
       "state": "pending",
-      "at": "2026-09-26T12:52:07.544Z"
+      "at": "2026-09-26T16:47:29.447Z"
+    },
+    "50646480cdda3672c65ae3d699b6603b475dbec3": {
+      "ref": "fix/static-nonroot",
+      "kind": "pr#33",
+      "state": "pending",
+      "at": "2026-09-26T16:47:29.168Z"
+    },
+    "c82312dfe42c9d994964f9caf450b8a251a559e3": {
+      "ref": "refs/heads/main",
+      "kind": "branch",
+      "state": "pending",
+      "at": "2026-09-26T16:47:28.855Z"
     },
     "ff713fcfb2bfa850572094e078bd5eed22cbcffb": {
       "ref": "fix/static-nonroot",
       "kind": "pr#33",
       "state": "pending",
       "at": "2026-09-26T12:52:07.276Z"
-    },
-    "c82312dfe42c9d994964f9caf450b8a251a559e3": {
-      "ref": "refs/heads/main",
-      "kind": "branch",
-      "state": "pending",
-      "at": "2026-09-26T12:52:06.909Z"
     }
   }
 }
