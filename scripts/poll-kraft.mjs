@@ -126,7 +126,10 @@ for (const t of targets) {
   // same SHA, pass or fail: only a NEW commit earns a new run.
   if (known && known.state !== "pending") continue;
 
-  const dispatchedAt = known?.at ?? 0;
+  // `known.at` is an ISO STRING. Subtracting it from a number yields NaN, and
+  // `NaN < STALE_MS` is false — so this guard was dead code and every tick
+  // re-dispatched commits that were still running. Parse it.
+  const dispatchedAt = known?.at ? new Date(known.at).getTime() : 0;
   if (known && now - dispatchedAt < STALE_MS) {
     console.log(`  ${t.sha.slice(0, 8)} (${t.kind}) still running`);
     continue;
@@ -140,6 +143,11 @@ for (const t of targets) {
   } catch {
     reported = null;
   }
+
+  console.log(
+    `  ${t.sha.slice(0, 8)} (${t.kind}) kraft says: ` +
+      `${reported ? reported.state : "no status"}`,
+  );
 
   if (reported && reported.state !== "pending") {
     state.runs[t.sha] = {
