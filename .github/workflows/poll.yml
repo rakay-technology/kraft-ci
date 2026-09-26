@@ -65,7 +65,11 @@ jobs:
       - name: Commit state
         run: |
           set -euo pipefail
-          if git diff --quiet .ci-state/state.json 2>/dev/null; then
+          # `git diff --quiet` only sees TRACKED files, and the state file is
+          # untracked until its first commit — so this step silently no-op'd on
+          # the very run that created it, and the poller lost its memory. Match
+          # on porcelain output, which covers modified AND untracked.
+          if [ -z "$(git status --porcelain -- .ci-state/state.json)" ]; then
             echo "no state change"
             exit 0
           fi
