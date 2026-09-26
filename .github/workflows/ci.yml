@@ -227,10 +227,22 @@ jobs:
       - name: Post commit status
         env:
           GH_TOKEN: ${{ secrets.KRAFT_PAT }}
-          SHA: ${{ github.event.inputs.ref || github.event.client_payload.sha }}
+          # A raw ref, not necessarily a SHA: workflow_dispatch carries a
+          # branch/tag/sha string, repository_dispatch carries a real SHA. The
+          # statuses API only accepts an object ID, so resolve it either way.
+          RAW_REF: ${{ github.event.inputs.ref || github.event.client_payload.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          SHA="$(gh api "repos/rakay-technology/kraft/commits/${RAW_REF}" --jq '.sha' 2>/dev/null || echo '')"
+          if [ -z "${SHA}" ]; then
+            # Nothing to attach the status to (an unpushed branch, a deleted
+            # ref). The jobs above already reported their own result — this
+            # step is only the PR-facing summary, so it must not fail the run.
+            echo "::notice::cannot resolve '${RAW_REF}' to a kraft commit — skipping the status."
+            exit 0
+          fi
+          echo "reporting to kraft ${SHA} (${RAW_REF})"
           if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
             state=failure
             desc="one or more CI jobs failed"
