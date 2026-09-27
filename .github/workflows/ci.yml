@@ -213,13 +213,36 @@ jobs:
       - name: Check skills
         run: node scripts/check-skills.mjs
 
+  # Enforces WHERE CI/CD is allowed to run (kraft AGENTS.md → CI/CD location):
+  # source on the private kraft, compute on this public repo. The heavy work is
+  # here because GitHub bills Actions minutes per repository — unlimited here,
+  # limited and exhaustible there.
+  #
+  # No `bun install`: the guard is deliberately dependency-free so it runs in a
+  # bare checkout of kraft. It reads `.github/workflows/*.yml` and fails on any
+  # `runs-on` that names a hosted runner — directly or as an expression's
+  # fallback — printing the release-path exceptions it still tolerates.
+  ci-location:
+    name: CI/CD location rule
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.sha }}
+          token: ${{ secrets.KRAFT_PAT }}
+      - name: Assert no workflow in kraft runs on a hosted runner
+        run: node scripts/check-ci-location.mjs
+
   # Post the outcome back to the private repo so the commit — and therefore the
   # PR that heads it — shows the real result. `always()` so a failure reports
   # too; a silent job would leave the PR with no kraft-ci check at all, which
   # is worse than a red one.
   report:
     name: Report to kraft
-    needs: [typecheck, format, test, webmail-server-test, skills]
+    needs: [typecheck, format, test, webmail-server-test, skills, ci-location]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
