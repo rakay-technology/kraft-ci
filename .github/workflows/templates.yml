@@ -1,18 +1,29 @@
 name: Templates
 
-# Autonomous validation of the 540 app templates inherited from Dokploy
-# (packages/core/src/apps/catalog/*.json in the PRIVATE rakay-technology/kraft),
-# on THREE levels:
+# Validation of the templates users ACTUALLY install, on THREE levels:
 #   validate → static checks (pinning, refs, ports, volumes, shape)
 #   images   → every referenced image exists on its registry (no pull)
 #   deploy   → every template actually BOOTS on a real daemon (sharded)
+#
+# ── Which set? ──────────────────────────────────────────────────────────────
+# NOT the catalog bundled in `packages/core/src/apps/catalog/`. That is the
+# offline / last-good fallback and, since the Dokploy bulk-import removal
+# (kraft@930e1fa), a small subset. The templates users see come from
+# `rakay-technology/kraft-templates` (blueprints → compiled `catalog.json`,
+# overlaid on the bundled one at runtime — see apps/api `catalog-source.ts`).
+#
+# So `prepare` compiles those blueprints with the vendor-free build script and
+# splits the merged catalog back into the per-app files the ladder reads, and
+# every job points KRAFT_TEMPLATES_CATALOG_DIR at the result. Validating the
+# bundled fallback reported on 32 apps and hid the rest: pointing the SAME
+# checks at the real 303 found 29 failing, 28 of them `available: true`.
 #
 # Deliberately STANDALONE: not a release gate, not triggered by releases. A red
 # template blocks nothing — the per-template reports below are the fix list, and
 # templates get fixed one by one. Red until clean is the normal state.
 #
 # Triggers: nightly cron on main (validate + images) + manual dispatch.
-# Deploy is dispatch-only (540 boots ≈ 18h total): pick a shard (1/12…12/12)
+# Deploy is dispatch-only (a full boot sweep is ~18h): pick a shard (1/12…12/12)
 # or a single template via `only`.
 
 on:
@@ -34,7 +45,7 @@ on:
         type: string
         default: "1/12"
       deploy_mode:
-        description: "Deploy job mode: boot (real pull+boot, slow) or config-only (render check, all 540 in minutes)"
+        description: "Deploy job mode: boot (real pull+boot, slow) or config-only (render check, all in minutes)"
         required: false
         type: choice
         options:
@@ -48,17 +59,68 @@ permissions:
   contents: read
 
 jobs:
+  # Compile the REMOTE blueprints once, and hand every job the per-app files the
+  # ladder reads. Cheap: plain node, no dependencies, no Docker.
+  prepare:
+    name: Compile kraft-templates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      # Keyed on so the image-check cache invalidates when the set changes.
+      catalog_hash: ${{ steps.split.outputs.hash }}
+    steps:
+      # Public repo: no token needed.
+      - name: Checkout kraft-templates
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft-templates
+          path: templates
+
+      - name: Compile + split into per-app files
+        id: split
+        run: |
+          set -euo pipefail
+          node templates/build-scripts/compile.js build \
+            --in templates/blueprints \
+            --out /tmp/remote-catalog.json \
+            --index /tmp/remote-index.json
+          mkdir -p /tmp/remote-catalog
+          node -e '
+            const fs = require("fs");
+            const apps = JSON.parse(fs.readFileSync("/tmp/remote-catalog.json", "utf8")).apps;
+            for (const a of apps) fs.writeFileSync(`/tmp/remote-catalog/${a.id}.json`, JSON.stringify(a, null, 2));
+            console.log(`split ${apps.length} app(s)`);
+          '
+          echo "hash=$(sha256sum /tmp/remote-catalog.json | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the per-app catalog
+        uses: actions/upload-artifact@v7
+        with:
+          name: remote-catalog
+          path: /tmp/remote-catalog
+          if-no-files-found: error
+          retention-days: 7
+
   validate:
     name: Validate templates
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # The ladder's scripts and the app schema live in the private repo, so a
+      # kraft checkout is required even though the CATALOG comes from above.
       - name: Checkout private kraft
         uses: actions/checkout@v7
         with:
           repository: rakay-technology/kraft
           ref: ${{ inputs.ref || 'main' }}
           token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Download the compiled catalog
+        uses: actions/download-artifact@v8
+        with:
+          name: remote-catalog
+          path: /tmp/remote-catalog
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -79,6 +141,7 @@ jobs:
       - name: Validate all templates
         env:
           TEMPLATES_ONLY: ${{ inputs.only || '' }}
+          KRAFT_TEMPLATES_CATALOG_DIR: /tmp/remote-catalog
         run: bun run templates -- --json /tmp/templates-report.json
 
       - name: Upload report
@@ -92,6 +155,7 @@ jobs:
 
   images:
     name: Check template images exist
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -101,6 +165,12 @@ jobs:
           repository: rakay-technology/kraft
           ref: ${{ inputs.ref || 'main' }}
           token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Download the compiled catalog
+        uses: actions/download-artifact@v8
+        with:
+          name: remote-catalog
+          path: /tmp/remote-catalog
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -119,18 +189,20 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Weekly cache: image checks are anonymous registry HEADs (rate-limited),
-      # so reuse results ≤7 days old and only recheck the rest + unknowns.
+      # so reuse results ≤7 days old and only recheck the rest + unknowns. Keyed
+      # on the compiled catalog, so a template change re-checks what moved.
       - name: Restore image-check cache
         uses: actions/cache@v6
         with:
           path: .templates-image-cache.json
-          key: tpl-images-${{ hashFiles('packages/core/src/apps/catalog/*.json') }}
+          key: tpl-images-${{ needs.prepare.outputs.catalog_hash }}
           restore-keys: |
             tpl-images-
 
       - name: Check all template images
         env:
           TEMPLATES_ONLY: ${{ inputs.only || '' }}
+          KRAFT_TEMPLATES_CATALOG_DIR: /tmp/remote-catalog
           TPL_IMAGE_CACHE: .templates-image-cache.json
           # Verifies our own private images too (anonymous check can't).
           GHCR_TOKEN: ${{ secrets.KRAFT_PAT }}
@@ -149,8 +221,9 @@ jobs:
     name: Boot templates (${{ inputs.deploy_mode || 'boot' }} ${{ inputs.shard || '1/12' }})
     # Dispatch-only: a full boot sweep is ~18h, sharded into ~90min slices. The
     # nightly cron must NOT start boots unattended. config-only mode ignores
-    # the shard and render-checks all 540 (minutes).
+    # the shard and render-checks all of them (minutes).
     if: github.event_name == 'workflow_dispatch'
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -160,6 +233,12 @@ jobs:
           repository: rakay-technology/kraft
           ref: ${{ inputs.ref || 'main' }}
           token: ${{ secrets.KRAFT_PAT }}
+
+      - name: Download the compiled catalog
+        uses: actions/download-artifact@v8
+        with:
+          name: remote-catalog
+          path: /tmp/remote-catalog
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -180,6 +259,7 @@ jobs:
       - name: Boot template shard (or render-check all)
         env:
           TEMPLATES_ONLY: ${{ inputs.only || '' }}
+          KRAFT_TEMPLATES_CATALOG_DIR: /tmp/remote-catalog
         run: |
           if [ "${{ inputs.deploy_mode || 'boot' }}" = "config-only" ]; then
             bun run templates:deploy -- --config-only --json /tmp/deploy-report.json
