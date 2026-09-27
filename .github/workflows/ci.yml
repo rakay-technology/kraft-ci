@@ -213,13 +213,60 @@ jobs:
       - name: Check skills
         run: node scripts/check-skills.mjs
 
+  # Guards the external blueprints pipeline against converter drift.
+  #
+  # Moved here from the private kraft repo, which cannot run ANY Actions job —
+  # it is out of minutes, so even a two-second dispatcher fails with
+  # `steps: []` / `runner_id: 0` (see poll.yml). The check itself is unchanged:
+  # the templates repo vendors the compiled converter, so a Kraft-side change to
+  # it must be re-vendored there, and the published catalog must equal a fresh
+  # conversion. Only the kraft checkout needs the PAT; templates is public.
+  drift:
+    name: Blueprints drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private kraft
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.sha }}
+          token: ${{ secrets.KRAFT_PAT }}
+          path: kraft
+      - name: Checkout kraft-templates
+        uses: actions/checkout@v7
+        with:
+          repository: rakay-technology/kraft-templates
+          path: templates
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.10
+      - name: Install dependencies
+        working-directory: kraft
+        run: bun install --frozen-lockfile
+      - name: Converter bundle matches the vendored copy
+        working-directory: kraft
+        run: |
+          bun build packages/core/src/apps/blueprint/compile.ts --target=node --format=cjs --outfile=/tmp/converter.bundle.js
+          if ! cmp -s /tmp/converter.bundle.js ../templates/build-scripts/converter.bundle.js; then
+            echo "::error::converter.bundle.js drifted — re-vendor it into rakay-technology/kraft-templates:"
+            echo "  bun build packages/core/src/apps/blueprint/compile.ts --target=node --format=cjs --outfile=build-scripts/converter.bundle.js"
+            echo "  git rev-parse HEAD > build-scripts/converter.version"
+            exit 1
+          fi
+      - name: Published catalog matches a fresh conversion
+        run: |
+          bun ./kraft/packages/core/scripts/compile-templates.ts --in ./templates/blueprints --out /tmp/catalog.json --index /tmp/index.json
+          cmp /tmp/catalog.json templates/catalog.json || (echo "::error::catalog.json is stale — CI on the templates repo rebuilds it on merge" && exit 1)
+
   # Post the outcome back to the private repo so the commit — and therefore the
   # PR that heads it — shows the real result. `always()` so a failure reports
   # too; a silent job would leave the PR with no kraft-ci check at all, which
   # is worse than a red one.
   report:
     name: Report to kraft
-    needs: [typecheck, format, test, webmail-server-test, skills]
+    needs: [typecheck, format, test, webmail-server-test, skills, drift]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
