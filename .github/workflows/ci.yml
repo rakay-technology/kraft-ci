@@ -269,8 +269,11 @@ jobs:
           if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
             state=failure
             desc="one or more CI jobs failed"
-          elif [ "${{ contains(needs.*.result, 'success') }}" = "true" ] &&
-               [ "$(echo '${{ join(needs.*.result, ',') }}' | grep -cv '^success$' || true)" = "0" ]; then
+          elif [ "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            # No job in `needs` is conditional, so "no failure and no cancellation"
+            # is exactly "every job passed". The old form joined the results with
+            # commas into ONE line and then `grep -cv '^success$'` counted that line
+            # as a non-match, so it returned 1 and every green run posted "pending".
             state=success
             desc="typecheck + format + test + skills passed"
           else
